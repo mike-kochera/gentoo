@@ -17,7 +17,7 @@ else
 	(( $(ver_cut 2) )) && WINE_SDIR=$(ver_cut 1).x || WINE_SDIR=$(ver_cut 1).0
 	SRC_URI="https://dl.winehq.org/wine/source/${WINE_SDIR}/wine-${PV}.tar.xz"
 	S="${WORKDIR}/wine-${PV}"
-	KEYWORDS="-* ~amd64 ~x86"
+	KEYWORDS="-* ~amd64 x86"
 fi
 
 DESCRIPTION="Free implementation of Windows(tm) on Unix, without external patchsets"
@@ -169,6 +169,18 @@ src_prepare() {
 
 	default
 
+	if tc-is-clang; then
+		if use mingw; then
+			# -mabi=ms was ignored by <clang:16 then turned error in :17
+			# if used without --target *-windows, then gets used in install
+			# phase despite USE=mingw, drop as a quick fix for now
+			sed -i '/MSVCRTFLAGS=/s/-mabi=ms//' configure.ac || die
+		else
+			# ./configure will fail, abort early
+			die "building ${PN} with clang is only supported with USE=mingw"
+		fi
+	fi
+
 	# ensure .desktop calls this variant + slot
 	sed -i "/^Exec=/s/wine /${P} /" loader/wine.desktop || die
 
@@ -270,14 +282,17 @@ src_configure() {
 			# use *FLAGS for mingw, but strip unsupported
 			: "${CROSSCFLAGS:=$(
 				# >=wine-7.21 configure.ac no longer adds -fno-strict by mistake
-				append-cflags '-fno-strict-aliasing'
+				append-cflags -fno-strict-aliasing
+
 				filter-flags '-fstack-protector*' #870136
 				filter-flags '-mfunction-return=thunk*' #878849
+
 				# -mavx with mingw-gcc has a history of obscure issues and
 				# disabling is seen as safer, e.g. `WINEARCH=win32 winecfg`
 				# crashes with -march=skylake >=wine-8.10, similar issues with
 				# znver4: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=110273
-				use custom-cflags || append-cflags -mno-avx
+				append-cflags -mno-avx #912268
+
 				CC=${CROSSCC} test-flags-CC ${CFLAGS:--O2})}"
 			: "${CROSSLDFLAGS:=$(
 				filter-flags '-fuse-ld=*'

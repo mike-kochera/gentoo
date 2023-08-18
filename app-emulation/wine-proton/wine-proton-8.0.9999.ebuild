@@ -60,8 +60,10 @@ WINE_DLOPEN_DEPEND="
 	v4l? ( media-libs/libv4l[${MULTILIB_USEDEP}] )
 	xcomposite? ( x11-libs/libXcomposite[${MULTILIB_USEDEP}] )
 	xinerama? ( x11-libs/libXinerama[${MULTILIB_USEDEP}] )"
+# gcc: for -latomic with clang
 WINE_COMMON_DEPEND="
 	${WINE_DLOPEN_DEPEND}
+	sys-devel/gcc:*
 	x11-libs/libX11[${MULTILIB_USEDEP}]
 	x11-libs/libXext[${MULTILIB_USEDEP}]
 	alsa? ( media-libs/alsa-lib[${MULTILIB_USEDEP}] )
@@ -149,6 +151,16 @@ src_prepare() {
 
 	default
 
+	if tc-is-clang; then
+		# -mabi=ms was ignored by <clang:16 then turned error in :17
+		# and it still gets used in install phase despite --with-mingw,
+		# drop as a quick fix for now which hopefully should be safe
+		sed -i '/MSVCRTFLAGS=/s/-mabi=ms//' configure.ac || die
+
+		# needed by Valve's fsync patches if using clang (undef atomic_load_8)
+		sed -i '/^UNIX_LIBS.*=/s/$/ -latomic/' dlls/ntdll/Makefile.in || die
+	fi
+
 	# ensure .desktop calls this variant + slot
 	sed -i "/^Exec=/s/wine /${P} /" loader/wine.desktop || die
 
@@ -178,6 +190,8 @@ src_configure() {
 		# upstream (Valve) doesn't really support misc configurations (e.g.
 		# adds vulkan code not always guarded by --with-vulkan), so force
 		# some major options that are typically needed by games either way
+		# TODO?: --without-mingw could make sense *if* using clang, assuming
+		# bug #912237 is resolved (consider when do USE=wow64 in proton-9)
 		--with-freetype
 		--with-mingw # needed by many, notably Blizzard titles
 		--with-opengl
@@ -220,11 +234,7 @@ src_configure() {
 		--without-vosk # unpackaged, file a bug if you need this
 	)
 
-	# builds with non-bfd but broken at runtime (bug #867097)
-	# TODO: retest mold and lld, and figure out what's wrong if
-	# still broken given (at least) lld is supposed to work
-	tc-ld-force-bfd
-
+	tc-ld-force-bfd # builds with non-bfd but broken at runtime (bug #867097)
 	filter-lto # build failure
 	use custom-cflags || strip-flags # can break in obscure ways at runtime
 	use crossdev-mingw || PATH=${BROOT}/usr/lib/mingw64-toolchain/bin:${PATH}
@@ -267,14 +277,17 @@ src_configure() {
 		: "${CROSSCFLAGS:=$(
 			# >=wine-7.21 <8.10's configure.ac does not pass -fno-strict when
 			# it should (can be removed when proton is rebased on >=8.10)
-			append-cflags '-fno-strict-aliasing'
+			append-cflags -fno-strict-aliasing
+
 			filter-flags '-fstack-protector*' #870136
 			filter-flags '-mfunction-return=thunk*' #878849
+
 			# -mavx with mingw-gcc has a history of obscure issues and
 			# disabling is seen as safer, e.g. `WINEARCH=win32 winecfg`
 			# crashes with -march=skylake >=wine-8.10, similar issues with
 			# znver4: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=110273
-			use custom-cflags || append-cflags -mno-avx
+			append-cflags -mno-avx #912268
+
 			CC=${CROSSCC} test-flags-CC ${CFLAGS:--O2})}"
 		: "${CROSSLDFLAGS:=$(
 			filter-flags '-fuse-ld=*'

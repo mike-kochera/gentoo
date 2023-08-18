@@ -4,6 +4,7 @@
 EAPI=8
 
 MULTILIB_COMPAT=( abi_x86_{32,64} )
+# note: multilib+wrapper are not unused, currently a pkgcheck false positive
 inherit autotools flag-o-matic multilib multilib-build
 inherit prefix toolchain-funcs wrapper
 
@@ -35,6 +36,7 @@ IUSE="
 	+truetype udev udisks +unwind usb v4l +vulkan wayland wow64
 	+xcomposite xinerama"
 # bug #551124 for truetype
+# TODO: wow64 can be done without mingw if using clang (needs bug #912237)
 REQUIRED_USE="
 	X? ( truetype )
 	crossdev-mingw? ( mingw )
@@ -124,8 +126,11 @@ DEPEND="
 	sys-kernel/linux-headers
 	X? ( x11-base/xorg-proto )"
 BDEPEND="
+	|| (
+		sys-devel/binutils
+		sys-devel/lld
+	)
 	dev-lang/perl
-	sys-devel/binutils
 	sys-devel/bison
 	sys-devel/flex
 	virtual/pkgconfig
@@ -180,6 +185,22 @@ src_prepare() {
 	fi
 
 	default
+
+	if tc-is-clang; then
+		if use mingw; then
+			# -mabi=ms was ignored by <clang:16 then turned error in :17
+			# if used without --target *-windows, then gets used in install
+			# phase despite USE=mingw, drop as a quick fix for now
+			sed -i '/MSVCRTFLAGS=/s/-mabi=ms//' configure.ac || die
+		else
+			# fails in ./configure unless --enable-archs is passed, allow to
+			# bypass with EXTRA_ECONF but is currently considered unsupported
+			# (by Gentoo) as additional work is needed for (proper) support
+			# note: also fails w/ :17, but unsure if safe to drop w/o mingw
+			[[ ${EXTRA_ECONF} == *--enable-archs* ]] ||
+				die "building ${PN} with clang is only supported with USE=mingw"
+		fi
+	fi
 
 	# ensure .desktop calls this variant + slot
 	sed -i "/^Exec=/s/wine /${P} /" loader/wine.desktop || die
@@ -244,18 +265,18 @@ src_configure() {
 		$(usev !odbc ac_cv_lib_soname_odbc=)
 	)
 
-	# builds with non-bfd but broken at runtime (bug #867097)
-	# TODO: retest mold and lld, and figure out what's wrong if
-	# still broken given (at least) lld is supposed to work
-	tc-ld-force-bfd
-
 	filter-lto # build failure
 	use custom-cflags || strip-flags # can break in obscure ways at runtime
 
-	# temporary workaround for tc-ld-force-bfd not yet enforcing with mold
-	# https://github.com/gentoo/gentoo/pull/28355
-	[[ $($(tc-getCC) ${LDFLAGS} -Wl,--version 2>/dev/null) == mold* ]] &&
-		append-ldflags -fuse-ld=bfd
+	# wine uses linker tricks unlikely to work with non-bfd/lld (bug #867097)
+	# (do self test until https://github.com/gentoo/gentoo/pull/28355)
+	if [[ $(LC_ALL=C $(tc-getCC) ${LDFLAGS} -Wl,--version 2>/dev/null) != @(LLD|GNU\ ld)* ]]
+	then
+		has_version -b sys-devel/binutils &&
+			append-ldflags -fuse-ld=bfd ||
+			append-ldflags -fuse-ld=lld
+		strip-unsupported-flags
+	fi
 
 	if use mingw; then
 		use crossdev-mingw || PATH=${BROOT}/usr/lib/mingw64-toolchain/bin:${PATH}
@@ -280,7 +301,7 @@ src_configure() {
 				# disabling is seen as safer, e.g. `WINEARCH=win32 winecfg`
 				# crashes with -march=skylake >=wine-8.10, similar issues with
 				# znver4: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=110273
-				use custom-cflags || append-cflags -mno-avx
+				append-cflags -mno-avx #912268
 
 				CC=${mingwcc} test-flags-CC ${CFLAGS:--O2}
 			)}"
@@ -327,22 +348,27 @@ src_install() {
 	use abi_x86_32 && emake DESTDIR="${D}" -C ../build32 install
 	use abi_x86_64 && emake DESTDIR="${D}" -C ../build64 install # do last
 
-	if use wow64; then
-		# compat symlinks, albeit ideally no one should call "wine64"
-		dosym wine ${WINE_PREFIX}/bin/wine64
-		dosym wine-preloader ${WINE_PREFIX}/bin/wine64-preloader
-	elif use abi_x86_64 && use !abi_x86_32; then
-		# if no 32bit support it instead only installs "wine64" which may
-		# come as unexpected, so provide "wine" alongside its man page
-		dosym wine64 ${WINE_PREFIX}/bin/wine
-		dosym wine64-preloader ${WINE_PREFIX}/bin/wine-preloader
-		local man
-		for man in ../build64/loader/wine.*man; do
-			: "${man##*/wine}"
-			: "${_%.*}"
-			insinto ${WINE_DATADIR}/man/${_:+${_#.}/}man1
-			newins ${man} wine.1
-		done
+	# Ensure both wine64 and wine are available if USE=abi_x86_64 (wow64,
+	# -abi_x86_32, and/or EXTRA_ECONF could cause varying scenarios where
+	# one or the other could be missing and that is unexpected for users
+	# and some tools like winetricks)
+	if use abi_x86_64; then
+		if [[ -e ${ED}${WINE_PREFIX}/bin/wine64 && ! -e ${ED}${WINE_PREFIX}/bin/wine ]]; then
+			dosym wine64 ${WINE_PREFIX}/bin/wine
+			dosym wine64-preloader ${WINE_PREFIX}/bin/wine-preloader
+
+			# also install wine(1) man pages (incl. translations)
+			local man
+			for man in ../build64/loader/wine.*man; do
+				: "${man##*/wine}"
+				: "${_%.*}"
+				insinto ${WINE_DATADIR}/man/${_:+${_#.}/}man1
+				newins ${man} wine.1
+			done
+		elif [[ ! -e ${ED}${WINE_PREFIX}/bin/wine64 && -e ${ED}${WINE_PREFIX}/bin/wine ]]; then
+			dosym wine ${WINE_PREFIX}/bin/wine64
+			dosym wine-preloader ${WINE_PREFIX}/bin/wine64-preloader
+		fi
 	fi
 
 	use perl || rm "${ED}"${WINE_DATADIR}/man/man1/wine{dump,maker}.1 \

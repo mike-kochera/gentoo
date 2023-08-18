@@ -161,8 +161,6 @@ games-action/a-story-about-my-uncle
 games-action/badland
 games-action/brutal-legend-gog
 games-action/brutal-legend-hb
-games-action/descent3
-games-action/descent3-demo
 games-action/minecraft-launcher
 games-action/psychonauts-gog
 games-action/psychonauts-hb
@@ -359,7 +357,6 @@ sys-apps/gentoo-systemd-integration
 sys-apps/systemd
 sys-apps/systemd-readahead
 sys-boot/systemd-boot
-sys-power/switcheroo-control
 sys-process/systemd-cron
 >=www-misc/profile-sync-daemon-6
 
